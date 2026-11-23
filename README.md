@@ -1,4 +1,4 @@
-# CrossKit
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark.svg"><img src="brand/logo.svg" width="32" height="32" alt="" align="absmiddle"></picture> CrossKit</h1>
 
 CrossKit is an Xcode Source Editor Extension that bridges Xcode to Language Server Protocol (LSP) servers for **Kotlin**, **Zig**, **Rust**, **C++**, **JavaScript**, **TypeScript**, and **WebAssembly** text:
 
