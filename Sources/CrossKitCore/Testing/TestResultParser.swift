@@ -2,8 +2,24 @@ import Foundation
 
 /// Parses runner output (or JUnit XML) into per-test results.
 public enum TestResultParser {
-    public static func parse(kind: TestRunnerKind, output: String, reportsDirectory: String? = nil, since: Date? = nil) -> [TestCaseResult] {
+    public static func parse(kind: TestRunnerKind, output: String, reportsDirectory: String? = nil, since: Date? = nil,
+                             reportFile: String? = nil) -> [TestCaseResult] {
+        let report = reportFile.flatMap { FileManager.default.contents(atPath: $0) }
         switch kind {
+        case .ctest:
+            let xml = report.map(CppTesting.parseJUnit) ?? []
+            return xml.isEmpty ? CppTesting.parseConsole(output) : xml
+        case .vitest, .nodeTest, .bunTest:
+            return report.map(JSTesting.parseJUnit) ?? []
+        case .jest:
+            return report.map(JSTesting.parseJestJSON) ?? []
+        case .wasmtimeInvoke:
+            return WasmTesting.parseInvoke(output)
+        case .nodeWasm:
+            return WasmHarness.parse(output).results
+        case .wasmtimeWast:
+            return []   // needs the discovered assertions: see WasmTesting.parseWast
+
         case .zigTest: return zigTest(output)
         case .zigBuild: return zigBuild(output)
         case .cargoTest: return libtest(output)

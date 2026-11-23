@@ -40,7 +40,10 @@ struct DebuggerView: View {
             VStack(spacing: 0) {
                 List(model.debugSessions, selection: $selection.id) { session in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(session.title).fontWeight(.medium)
+                        HStack(spacing: 5) {
+                            FileIconView(language: session.language, size: 16)
+                            Text(session.title).fontWeight(.medium)
+                        }
                         HStack(spacing: 4) {
                             Circle().fill(color(session.state)).frame(width: 7, height: 7)
                             Text("\(session.language.displayName) · \(stateLabel(session.state))")
@@ -106,7 +109,10 @@ struct SessionDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title).font(.title3).fontWeight(.semibold)
+                HStack(spacing: 6) {
+                    FileIconView(language: session.language, size: 22)
+                    Text(session.title).font(.title3).fontWeight(.semibold)
+                }
                 Text("\(session.debugger.displayName) · \(session.program)")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -157,12 +163,31 @@ struct SessionDetail: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            } else if session.debugger == .nodeAttach, let address = session.jdwpAddress {
+                GroupBox("Node.js inspector") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Node.js listens on \(address) and waits (--inspect-brk) until a debugger attaches.")
+                        HStack {
+                            Text(session.attachCommand ?? "node inspect \(address)").font(.caption.monospaced()).textSelection(.enabled).lineLimit(4)
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(session.attachCommand ?? "node inspect \(address)", forType: .string)
+                            }
+                        }
+                        Text("Chrome: open chrome://inspect › Configure… › add \(address). VS Code: a launch configuration of type \"node\", request \"attach\", port \(address.split(separator: ":").last ?? "").")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if session.debugger == .nodeInspect, session.state == .external || session.state == .waitingForDebugger {
+                Text("node inspect runs in a Terminal window; use its commands there (`cont`, `next`, `step`, `out`, `repl`, `bt`, `sb(file, line)`).")
+                    .font(.caption).foregroundStyle(.secondary)
             } else if session.state == .external {
                 Text("lldb runs in a Terminal window; use lldb commands there (`continue`, `next`, `step`, `frame variable`, `bt`).")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            if session.debugger.usesDAP {
+            if session.debugger.isControlled {
                 HSplitView {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Call Stack").font(.headline)

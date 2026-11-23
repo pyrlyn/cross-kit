@@ -45,6 +45,7 @@ extension AppModel {
             rendered.imagePath.flatMap { NSImage(contentsOfFile: $0) }.map { (rendered.id, $0) }
         })
         preview = result
+        previewShowsInspection = false
         previewError = nil
         previewFileDate = Self.modificationDate(result.filePath)
         PreviewWindow.show(model: self)
@@ -76,6 +77,14 @@ extension AppModel {
 
     /// Called every second by the Preview window: re-renders when the file was saved.
     func checkPreviewAutoRefresh() {
+        if previewShowsInspection {
+            guard settings.previewAutoRefresh, let current = inspection, !inspecting else { return }
+            if let date = Self.modificationDate(current.filePath), let known = previewFileDate, date > known {
+                previewFileDate = date
+                refreshInspection()
+            }
+            return
+        }
         guard settings.previewAutoRefresh, let current = preview, !previewRendering else { return }
         let date = Self.modificationDate(current.filePath)
         if let date, let known = previewFileDate, date > known {

@@ -49,9 +49,9 @@ public struct DebugSessionSnapshot: Codable, Equatable, Identifiable, Sendable {
     public var breakpoints: [Breakpoint]
     public var error: String?
 
-    public var canStep: Bool { debugger.usesDAP && state == .stopped }
-    public var canContinue: Bool { debugger.usesDAP && state == .stopped }
-    public var canPause: Bool { debugger.usesDAP && state == .running }
+    public var canStep: Bool { debugger.isControlled && state == .stopped }
+    public var canContinue: Bool { debugger.isControlled && state == .stopped }
+    public var canPause: Bool { debugger.isControlled && state == .running }
     public var canStop: Bool { state.isActive }
 }
 
@@ -63,6 +63,9 @@ public final class DebugSession: @unchecked Sendable {
     private let onChange: @Sendable (DebugSessionSnapshot) -> Void
     var dap: DAPClient?
     var jvm: ChildProcess?
+    /// Node.js inspector session (JavaScript, TypeScript, WebAssembly).
+    var cdp: CDPClient?
+    let inspector = InspectorState()
     private var initializedEvent = false
     private let maxOutput = 256 * 1024
 
@@ -222,6 +225,7 @@ public final class DebugSession: @unchecked Sendable {
     public func pause() async throws { try await threadCommand("pause") }
 
     private func threadCommand(_ command: String) async throws {
+        if cdp != nil { return try await inspectorCommand(command) }
         guard let dap else { return }
         let thread = snapshot.threadID ?? 1
         if command != "pause" { update { $0.state = .running; $0.frames = []; $0.variables = [] } }
@@ -233,6 +237,10 @@ public final class DebugSession: @unchecked Sendable {
         if let dap {
             _ = try? await dap.request("disconnect", ["terminateDebuggee": true, "restart": false], timeout: 5)
             await shutdownAdapter()
+        }
+        if let cdp {
+            cdp.close()
+            self.cdp = nil
         }
         if let jvm {
             jvm.terminateGroup()

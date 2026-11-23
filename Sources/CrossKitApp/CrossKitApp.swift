@@ -35,12 +35,18 @@ struct MenuBarContent: View {
     var body: some View {
         ForEach(Language.allCases) { language in
             let status = model.statuses[language] ?? ServerStatus()
-            Text("\(language.displayName): \(status.state.rawValue)")
+            Label {
+                Text("\(language.displayName): \(status.state.rawValue)")
+            } icon: {
+                if let image = model.languageIcon(language) { Image(nsImage: image) }
+            }
         }
         Divider()
         Button("Debugger…") { DebuggerWindow.show(model: model) }
         Button("Run…") { RunWindow.show(model: model) }
         Button("Preview…") { PreviewWindow.show(model: model) }
+        Button("Inspect a File…") { model.chooseFileToInspect() }
+        Button("Coverage…") { CoverageWindow.show(model: model) }
         Button("Test Results…") {
             openWindow(id: "tests")
             NSApp.activate(ignoringOtherApps: true)

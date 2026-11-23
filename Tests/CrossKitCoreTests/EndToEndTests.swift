@@ -55,6 +55,54 @@ final class EndToEndTests: XCTestCase {
             hoverMustContain: "computeAnswer"))
     }
 
+    func testClangd() async throws {
+        try await runEndToEnd(.cpp, Sample(
+            files: ["compile_flags.txt": "-std=c++20\n"],
+            mainFile: "main.cpp",
+            source: ["// sample", "", "int computeAnswer(int value) {", "    return value * 2;", "}", "",
+                     "int main() {", "    int result = computeAnswer(21);", "    return result == 42 ? 0 : 1;", "}"],
+            brokenLine: "    int oops = ;", insertAfter: 7,
+            partialLine: "    int again = computeAns",
+            expectedCompletion: "computeAnswer", usageLine: 7, usageColumn: 18, definitionLine: 2,
+            hoverMustContain: "computeAnswer"))
+    }
+
+    func testTypeScriptLanguageServer() async throws {
+        try await runEndToEnd(.typescript, Sample(
+            files: ["tsconfig.json": "{ \"compilerOptions\": { \"strict\": true, \"target\": \"es2022\" } }\n"],
+            mainFile: "src/main.ts",
+            source: ["function computeAnswer(value: number): number {", "    return value * 2;", "}", "",
+                     "function main(): void {", "    const result = computeAnswer(21);", "    console.log(result);", "}", "main();"],
+            brokenLine: "    const oops = ;", insertAfter: 5,
+            partialLine: "    const again = computeAns",
+            expectedCompletion: "computeAnswer", usageLine: 5, usageColumn: 20, definitionLine: 0,
+            hoverMustContain: "computeAnswer"))
+    }
+
+    func testTypeScriptLanguageServerForJavaScript() async throws {
+        try await runEndToEnd(.javascript, Sample(
+            files: ["package.json": "{ \"type\": \"module\" }\n"],
+            mainFile: "main.js",
+            source: ["function computeAnswer(value) {", "    return value * 2;", "}", "",
+                     "function main() {", "    const result = computeAnswer(21);", "    console.log(result);", "}", "main();"],
+            brokenLine: "    const oops = ;", insertAfter: 5,
+            partialLine: "    const again = computeAns",
+            expectedCompletion: "computeAnswer", usageLine: 5, usageColumn: 20, definitionLine: 0,
+            hoverMustContain: "computeAnswer"))
+    }
+
+    func testWatServer() async throws {
+        try await runEndToEnd(.wasm, Sample(
+            files: [:],
+            mainFile: "main.wat",
+            source: ["(module", "  (func $computeAnswer (param $value i32) (result i32)", "    local.get $value", "    i32.const 2", "    i32.mul)",
+                     "  (func $main (export \"main\") (result i32)", "    i32.const 21", "    call $computeAnswer))"],
+            brokenLine: "    i32.const oops", insertAfter: 6,
+            partialLine: "    call $computeAns",
+            expectedCompletion: "computeAnswer", usageLine: 7, usageColumn: 12, definitionLine: 1,
+            hoverMustContain: "computeAnswer"))
+    }
+
     // MARK: Driver
 
     private func runEndToEnd(_ language: Language, _ sample: Sample) async throws {

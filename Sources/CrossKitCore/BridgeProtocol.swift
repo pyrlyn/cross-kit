@@ -3,6 +3,8 @@ import Foundation
 public enum BridgeOperation: String, Codable, Sendable {
     case ping, completion, definition, references, hover, diagnostics, discoverTests, runTests, debugFile, debugTest
     case build, run, preview, inlineAnnotations
+    /// Runs the file's tests with coverage.
+    case coverage
 
     public var feature: Feature? {
         switch self {
@@ -18,6 +20,7 @@ public enum BridgeOperation: String, Codable, Sendable {
         case .preview: return .preview
         // Checked per requested kind (CodeLens, inlay hints, ErrorLens).
         case .inlineAnnotations: return nil
+        case .coverage: return .coverage
         }
     }
 }
@@ -131,6 +134,9 @@ public struct BridgeResponse: Codable, Equatable, Sendable {
     public var debugLaunch: DebugLaunchInfo?
     public var programRun: ProgramRun?
     public var preview: PreviewResult?
+    /// Non-Kotlin "previews": assembly, symbols, emitted JavaScript, WebAssembly sections, …
+    public var inspection: InspectionResult?
+    public var coverage: CoverageReport?
     public var codeLenses: [BridgeCodeLens]?
     public var inlayHints: [BridgeInlayHint]?
     /// Kinds the host computed for an inlineAnnotations request.

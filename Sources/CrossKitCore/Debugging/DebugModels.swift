@@ -12,6 +12,13 @@ public enum DebuggerKind: String, Codable, CaseIterable, Identifiable, Sendable 
     case jdb
     /// JVM started with a JDWP agent that waits for an IDE (IntelliJ IDEA, VS Code, …) to attach.
     case jdwpAttach
+    /// Node.js started with `--inspect-brk`; CrossKit drives it over the Chrome DevTools Protocol in its Debugger window.
+    /// JavaScript, TypeScript and WebAssembly (run by CrossKit's Node.js harness).
+    case nodeInspector
+    /// `node inspect` (Node.js's command-line debugger) in a Terminal window.
+    case nodeInspect
+    /// Node.js started with `--inspect-brk` that waits for Chrome DevTools or VS Code to attach.
+    case nodeAttach
 
     public var id: String { rawValue }
 
@@ -22,6 +29,9 @@ public enum DebuggerKind: String, Codable, CaseIterable, Identifiable, Sendable 
         case .codelldb: return "CodeLLDB (CrossKit Debugger window)"
         case .jdb: return "JDWP + jdb in Terminal"
         case .jdwpAttach: return "JDWP, wait for IDE to attach"
+        case .nodeInspector: return "Node.js inspector (CrossKit Debugger window)"
+        case .nodeInspect: return "node inspect in Terminal"
+        case .nodeAttach: return "Node.js inspector, wait for Chrome DevTools / VS Code to attach"
         }
     }
 
@@ -32,17 +42,31 @@ public enum DebuggerKind: String, Codable, CaseIterable, Identifiable, Sendable 
         case .lldbDAP: return "lldb-dap"
         case .codelldb: return "codelldb"
         case .jdb, .jdwpAttach: return "java"
+        case .nodeInspector, .nodeInspect, .nodeAttach: return "node"
         }
     }
 
     public var usesDAP: Bool { self == .lldbDAP || self == .codelldb }
+    /// Driven over the Chrome DevTools Protocol (Node.js inspector).
+    public var usesCDP: Bool { self == .nodeInspector }
+    public var isNode: Bool { [.nodeInspector, .nodeInspect, .nodeAttach].contains(self) }
+    /// CrossKit's Debugger window can step, continue and pause.
+    public var isControlled: Bool { usesDAP || usesCDP }
     public var isJVM: Bool { self == .jdb || self == .jdwpAttach }
 
     public static func choices(for language: Language) -> [DebuggerKind] {
-        language == .kotlin ? [.jdb, .jdwpAttach] : nativeChoices
+        switch language {
+        case .kotlin: return [.jdb, .jdwpAttach]
+        case .javascript, .typescript: return nodeChoices
+        // WebAssembly: Node.js (V8 understands wasm) or lldb with Wasmtime's JIT debug info (modules with DWARF).
+        case .wasm: return nodeChoices + [.lldb, .lldbDAP]
+        case .zig, .rust, .cpp: return nativeChoices
+        }
     }
 
-    /// Debuggers for native code: Zig, Rust and Kotlin/Native binaries.
+    public static let nodeChoices: [DebuggerKind] = [.nodeInspector, .nodeInspect, .nodeAttach]
+
+    /// Debuggers for native code: Zig, Rust, C++ and Kotlin/Native binaries.
     public static let nativeChoices: [DebuggerKind] = [.lldbDAP, .lldb, .codelldb]
 }
 
@@ -192,7 +216,21 @@ public struct LaunchPlan: Codable, Equatable, Sendable {
         case gradleTest(command: [String])
         /// Kotlin/Native: the newest `.kexe` a link task wrote into this directory.
         case nativeExecutable(directory: String)
+        /// C++ (CMake): the executable target containing this source file (CMake File API codemodel).
+        case cmakeTarget(buildDirectory: String, sourceFile: String)
+        /// C++ (CTest): the command of the first test whose name matches the ICU regex (`ctest --show-only=json-v1`).
+        case ctestCommand(buildDirectory: String, namePattern: String)
+        /// A complete command line (Node.js, Wasmtime, the WebAssembly harness). `LaunchPlan.inspectPlaceholder`
+        /// marks where the inspector flag goes when debugging (removed when running).
+        case command([String])
     }
+
+    /// Replaced by `--inspect-brk=…` when debugging with the Node.js inspector.
+    public static let inspectPlaceholder = "{crosskit-inspect}"
+    /// WebAssembly: the binary a `.wat` file was assembled into (the Node.js inspector maps breakpoints with it).
+    public var wasmBinary: String?
+    /// WebAssembly: the `.wat` source of `wasmBinary`.
+    public var wasmSource: String?
 }
 
 /// What the extension shows after a debug command.
@@ -308,6 +346,8 @@ public struct DebuggerLocator: Sendable {
             guard let javaHome = locator.javaHome() else { return nil }
             let java = javaHome.appendingPathComponent("bin/java")
             return fm.isExecutableFile(atPath: java.path) ? java : nil
+        case .nodeInspector, .nodeInspect, .nodeAttach:
+            return ToolFinder(locator: locator).node()
         }
     }
 
@@ -320,6 +360,7 @@ public struct DebuggerLocator: Sendable {
     /// Auto-detection: lldb-dap (host-managed panel) if available, else lldb in Terminal; JVM: jdb in Terminal.
     public func autoKind(for language: Language) -> DebuggerKind {
         if language == .kotlin { return .jdb }
+        if [.javascript, .typescript, .wasm].contains(language) { return .nodeInspector }
         return find(.lldbDAP) != nil ? .lldbDAP : .lldb
     }
 
@@ -331,12 +372,21 @@ public struct DebuggerLocator: Sendable {
             return "Install the CodeLLDB extension (vadimcn.vscode-lldb) in VS Code or Cursor, choose its adapter/codelldb in CrossKit settings, or pick lldb-dap."
         case .jdb, .jdwpAttach:
             return "Install a JDK 17 or 21 (e.g. `mise use -g java@temurin-21`) or choose java in CrossKit settings."
+        case .nodeInspector, .nodeInspect, .nodeAttach:
+            return ToolFinder.nodeHint + " Or choose node in CrossKit settings."
         }
     }
 
     public func describe(_ language: Language) -> [(tool: String, path: String?)] {
         if language == .kotlin {
             return [("java", find(.jdb)?.path), ("jdb", jdb()?.path)]
+        }
+        if language == .javascript || language == .typescript {
+            return [("node", find(.nodeInspector)?.path)]
+        }
+        if language == .wasm {
+            let tools = ToolFinder(locator: locator)
+            return [("node", find(.nodeInspector)?.path), ("wasmtime", tools.wasmtime()?.path), ("lldb", find(.lldb)?.path)]
         }
         return [("lldb-dap", find(.lldbDAP)?.path), ("lldb", find(.lldb)?.path), ("codelldb", find(.codelldb)?.path)]
     }

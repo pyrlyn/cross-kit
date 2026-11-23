@@ -91,10 +91,19 @@ public actor ServerManager {
         update(language) {
             $0.state = .starting; $0.binaryPath = binary.path; $0.rootPath = key.root; $0.pid = nil
         }
-        let environment = ServerEnvironment.make(language: language, binary: binary, locator: locator)
+        let serverLaunch: ServerLaunch
+        do {
+            serverLaunch = try ServerLaunch.resolve(language: language, binary: binary, userArguments: settings.arguments(for: language),
+                                                    root: URL(fileURLWithPath: key.root, isDirectory: true), tools: ToolFinder(locator: locator))
+        } catch {
+            update(language) { $0.state = .error; $0.lastError = error.localizedDescription }
+            throw error
+        }
+        let environment = ServerEnvironment.make(language: language, binary: serverLaunch.executable, locator: locator)
+        update(language) { $0.binaryPath = serverLaunch.executable.path }
         let client: LSPClient
         do {
-            client = try LSPClient(language: language, executable: binary, arguments: settings.arguments(for: language),
+            client = try LSPClient(language: language, executable: serverLaunch.executable, arguments: serverLaunch.arguments,
                                    environment: environment, root: URL(fileURLWithPath: key.root, isDirectory: true),
                                    onTerminate: { [weak self] client, code, detail in
                                        Task { await self?.handleExit(key, client: client, code: code, detail: detail) }
@@ -105,7 +114,7 @@ public actor ServerManager {
         }
         update(language) { $0.pid = client.pid }
         do {
-            try await client.initialize(timeout: language.initializeTimeout)
+            try await client.initialize(timeout: language.initializeTimeout, initializationOptions: serverLaunch.initializationOptions)
         } catch {
             let detail = client.recentStderr
             await client.shutdown(timeout: 1)

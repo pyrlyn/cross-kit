@@ -8,6 +8,9 @@ public enum TestDiscovery {
         case .zig: return zig(lines)
         case .rust: return rust(lines, modulePrefix: rustFileModulePath(filePath: filePath, crateRoot: root))
         case .kotlin: return kotlin(lines)
+        case .cpp: return CppTesting.discover(lines)
+        case .javascript, .typescript: return JSTesting.discover(lines)
+        case .wasm: return WasmTesting.discover(text: text, filePath: filePath)
         }
     }
 
@@ -185,6 +188,8 @@ public enum TestDiscovery {
     private static let kotlinMain = try! NSRegularExpression(pattern: #"^\s*(?:public\s+)?fun\s+main\s*\("#)
     private static let zigMain = try! NSRegularExpression(pattern: #"^\s*pub\s+fn\s+main\s*\("#)
     private static let rustMain = try! NSRegularExpression(pattern: #"^\s*(?:pub\s+)?(?:async\s+)?fn\s+main\s*\("#)
+    private static let cppMain = try! NSRegularExpression(pattern: #"^\s*(?:int|auto|signed|extern\s+"C"\s+int)\s+main\s*\("#)
+    private static let wasmEntry = try! NSRegularExpression(pattern: #"\(\s*start\b|\(\s*export\s+"(?:_start|main|run)""#)
 
     /// 0-based line of the program entry point (`main`), if the file declares one.
     public static func mainLine(_ language: Language, text: String) -> Int? {
@@ -193,6 +198,9 @@ public enum TestDiscovery {
         case .zig: regex = zigMain
         case .rust: regex = rustMain
         case .kotlin: regex = kotlinMain
+        case .cpp: regex = cppMain
+        case .wasm: regex = wasmEntry
+        case .javascript, .typescript: return nil   // scripts run from the top
         }
         return text.components(separatedBy: "\n").firstIndex { line in
             let code = stripLineComment(line)
@@ -207,6 +215,9 @@ public enum TestDiscovery {
         case .zig: regex = zigMain
         case .rust: regex = rustMain
         case .kotlin: regex = kotlinMain
+        case .cpp: regex = cppMain
+        case .wasm: regex = wasmEntry
+        case .javascript, .typescript: return true   // any script is a program
         }
         return text.components(separatedBy: "\n").contains { line in
             let code = stripLineComment(line)

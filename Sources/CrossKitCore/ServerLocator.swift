@@ -45,10 +45,16 @@ public struct ServerLocator: Sendable {
                 add(toolchain.appendingPathComponent("bin/\(name)"))
             }
         }
+        // 1b. clangd from Xcode / the Command Line Tools (the real binary, not the /usr/bin xcrun shim).
+        if language == .cpp {
+            for dir in ToolFinder(locator: self).developerBinDirectories { add(dir.appendingPathComponent(name)) }
+        }
         // 2. mise installs (newest version first), searched a few levels deep.
         let installs = miseDataDirectory.appendingPathComponent("installs")
         for toolDir in language.miseToolDirectoryNames {
             for version in sortedChildren(of: installs.appendingPathComponent(toolDir)) {
+                // npm packages keep their executables in node_modules/.bin (hidden directories are not searched).
+                add(version.appendingPathComponent("node_modules/.bin/\(name)"))
                 for found in findExecutables(named: name, in: version, maxDepth: 4) { add(found) }
             }
         }
@@ -74,6 +80,10 @@ public struct ServerLocator: Sendable {
                 continue
             }
             add(url)
+        }
+        // 5. JavaScript/TypeScript: TypeScript 7's native compiler serves LSP itself (`tsc --lsp --stdio`).
+        if language == .javascript || language == .typescript, let native = ToolFinder(locator: self).nativeTypeScript(projectRoot: nil) {
+            add(native)
         }
         return result
     }
@@ -119,6 +129,11 @@ public struct ServerLocator: Sendable {
             }
         case .kotlin:
             if let javaHome = javaHome() { dirs.append(javaHome.appendingPathComponent("bin")) }
+        case .javascript, .typescript:
+            // typescript-language-server and tsc are Node.js scripts.
+            if let node = ToolFinder(locator: self).node() { dirs.append(node.deletingLastPathComponent()) }
+        case .cpp, .wasm:
+            break
         }
         dirs.append(miseDataDirectory.appendingPathComponent("shims"))
         return dirs
@@ -224,7 +239,7 @@ public enum ServerEnvironment {
                components.contains(".rustup") {
                 env["RUSTUP_TOOLCHAIN"] = components[index + 1]
             }
-        case .zig:
+        case .zig, .cpp, .javascript, .typescript, .wasm:
             break
         }
         return env
@@ -274,6 +289,25 @@ public enum WorkspaceResolver {
         case .kotlin:
             try fm.createDirectory(at: root, withIntermediateDirectories: true)
             file = root.appendingPathComponent("Main.kt")
+        case .cpp:
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            let flags = root.appendingPathComponent("compile_flags.txt")
+            if !fm.fileExists(atPath: flags.path) { try "-std=c++20\n-Wall\n".write(to: flags, atomically: true, encoding: .utf8) }
+            file = root.appendingPathComponent("main.cpp")
+        case .javascript:
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            file = root.appendingPathComponent("main.js")
+        case .typescript:
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            let config = root.appendingPathComponent("tsconfig.json")
+            if !fm.fileExists(atPath: config.path) {
+                try #"{ "compilerOptions": { "strict": true, "target": "es2022", "module": "nodenext" } }"#
+                    .write(to: config, atomically: true, encoding: .utf8)
+            }
+            file = root.appendingPathComponent("main.ts")
+        case .wasm:
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            file = root.appendingPathComponent("main.wat")
         }
         try text.write(to: file, atomically: true, encoding: .utf8)
         return file

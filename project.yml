@@ -125,6 +125,9 @@ targets:
                 XCSourceEditorCommandIdentifier: dev.pyrlyn.CrossKit.Extension.runTestAtCursor
                 XCSourceEditorCommandName: Run Test at Cursor
               - XCSourceEditorCommandClassName: $(PRODUCT_MODULE_NAME).SourceEditorCommand
+                XCSourceEditorCommandIdentifier: dev.pyrlyn.CrossKit.Extension.runTestsWithCoverage
+                XCSourceEditorCommandName: Run Tests with Coverage
+              - XCSourceEditorCommandClassName: $(PRODUCT_MODULE_NAME).SourceEditorCommand
                 XCSourceEditorCommandIdentifier: dev.pyrlyn.CrossKit.Extension.debugFileAtCursor
                 XCSourceEditorCommandName: Debug File at Cursor
               - XCSourceEditorCommandClassName: $(PRODUCT_MODULE_NAME).SourceEditorCommand
@@ -138,7 +141,7 @@ targets:
                 XCSourceEditorCommandName: Run File
               - XCSourceEditorCommandClassName: $(PRODUCT_MODULE_NAME).SourceEditorCommand
                 XCSourceEditorCommandIdentifier: dev.pyrlyn.CrossKit.Extension.showPreview
-                XCSourceEditorCommandName: Show Compose Preview at Cursor
+                XCSourceEditorCommandName: Show Preview
               - XCSourceEditorCommandClassName: $(PRODUCT_MODULE_NAME).SourceEditorCommand
                 XCSourceEditorCommandIdentifier: dev.pyrlyn.CrossKit.Extension.showCodeLenses
                 XCSourceEditorCommandName: Show Code Lenses

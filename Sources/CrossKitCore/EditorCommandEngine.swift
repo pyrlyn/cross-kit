@@ -70,6 +70,7 @@ public enum EditorCommand: String, CaseIterable, Codable, Sendable {
     case buildProject
     case runFile
     case showPreview
+    case runTestsWithCoverage
     case showCodeLenses
     case showInlayHints
     case showErrorLens
@@ -93,7 +94,8 @@ public enum EditorCommand: String, CaseIterable, Codable, Sendable {
         case .debugTestAtCursor: return "Debug Test at Cursor"
         case .buildProject: return "Build Project"
         case .runFile: return "Run File"
-        case .showPreview: return "Show Compose Preview at Cursor"
+        case .showPreview: return "Show Preview"
+        case .runTestsWithCoverage: return "Run Tests with Coverage"
         case .showCodeLenses: return "Show Code Lenses"
         case .showInlayHints: return "Show Inlay Hints"
         case .showErrorLens: return "Show ErrorLens Diagnostics"
@@ -125,6 +127,37 @@ public struct EditorCommandEngine: Sendable {
     public init() {}
 
     public func run(_ command: EditorCommand, buffer: EditorBuffer, transport: BridgeTransport) async throws -> EditorOutcome {
+        // Languages without `//` comments (WebAssembly text uses `;;`): work on `// [CrossKit]` internally and
+        // write the language's own comment marker into the buffer.
+        let prefix = Self.commentPrefix(for: buffer)
+        guard prefix != "//" else { return try await runCommand(command, buffer: buffer, transport: transport) }
+        var mapped = buffer
+        mapped.lines = buffer.lines.map { Self.toCanonicalMarker($0, prefix: prefix) }
+        var outcome = try await runCommand(command, buffer: mapped, transport: transport)
+        outcome.operations = outcome.operations.map { operation in
+            guard case .replaceLines(let start, let count, let lines) = operation else { return operation }
+            return .replaceLines(start: start, count: count, with: lines.map { Self.fromCanonicalMarker($0, prefix: prefix) })
+        }
+        return outcome
+    }
+
+    /// The line comment of the buffer's language (`//` unless known otherwise).
+    public static func commentPrefix(for buffer: EditorBuffer) -> String {
+        let language = buffer.filePath.flatMap(Language.guess(fromPath:)) ?? Language.guess(fromUTI: buffer.contentUTI)
+        return language?.lineCommentPrefix ?? "//"
+    }
+
+    static func toCanonicalMarker(_ line: String, prefix: String) -> String {
+        guard line.contains("\(prefix) [CrossKit]") else { return line }
+        return line.replacingOccurrences(of: "\(prefix) [CrossKit]", with: marker)
+    }
+
+    static func fromCanonicalMarker(_ line: String, prefix: String) -> String {
+        guard line.contains(marker) else { return line }
+        return line.replacingOccurrences(of: marker, with: "\(prefix) [CrossKit]")
+    }
+
+    func runCommand(_ command: EditorCommand, buffer: EditorBuffer, transport: BridgeTransport) async throws -> EditorOutcome {
         switch command {
         case .clearAnnotations: return clearAnnotations(buffer)
         case .openSettings: return EditorOutcome()
@@ -137,6 +170,7 @@ public struct EditorCommandEngine: Sendable {
         case .showTests: return try await tests(buffer, operation: .discoverTests, scope: nil, transport: transport)
         case .runTestsInFile: return try await tests(buffer, operation: .runTests, scope: .file, transport: transport)
         case .runTestAtCursor: return try await tests(buffer, operation: .runTests, scope: .cursor, transport: transport)
+        case .runTestsWithCoverage: return try await tests(buffer, operation: .coverage, scope: .file, transport: transport)
         case .debugFileAtCursor: return try await debug(buffer, operation: .debugFile, transport: transport)
         case .debugTestAtCursor: return try await debug(buffer, operation: .debugTest, transport: transport)
         case .buildProject: return try await program(buffer, operation: .build, transport: transport)
@@ -152,7 +186,8 @@ public struct EditorCommandEngine: Sendable {
 
     /// Whether a command may run for minutes (the extension uses a longer bridge timeout).
     public static func isLongRunning(_ command: EditorCommand) -> Bool {
-        [.runTestsInFile, .runTestAtCursor, .debugFileAtCursor, .debugTestAtCursor, .buildProject, .runFile, .showPreview].contains(command)
+        [.runTestsInFile, .runTestAtCursor, .runTestsWithCoverage, .debugFileAtCursor, .debugTestAtCursor, .buildProject, .runFile,
+         .showPreview].contains(command)
     }
 
     // MARK: Debugging
@@ -186,6 +221,11 @@ public struct EditorCommandEngine: Sendable {
                                     contentUTI: buffer.contentUTI, filePath: buffer.filePath)
         let response = try await transport.send(request)
         guard response.ok else { throw EditorCommandError.bridge(response.error ?? "CrossKit request failed") }
+        if let inspection = response.inspection {
+            var lines = ["◉ " + inspection.summary, "Showing it in CrossKit › Preview."]
+            if let warning = inspection.warning { lines.append("⚠︎ " + warning) }
+            return EditorOutcome(message: lines.joined(separator: "\n"))
+        }
         guard let result = response.preview else { throw EditorCommandError.nothing("No previews were rendered.") }
         var lines = ["◉ " + result.summary]
         if let focused = result.previews.first(where: { $0.id == result.focusedID }) {
@@ -284,11 +324,13 @@ public struct EditorCommandEngine: Sendable {
 
     // MARK: Tests (CodeLens substitute: `// [CrossKit] ▶ …` markers above test functions)
 
-    static let testMarkerSymbols = ["▶", "✓", "✗", "○"]
+    /// `░` marks lines without coverage; it is replaced with the test markers on every run.
+    static let testMarkerSymbols = ["▶", "✓", "✗", "○", "░"]
 
     public static func isTestMarker(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix(marker) else { return false }
+        // `;; [CrossKit]` is the same marker in WebAssembly text.
+        guard trimmed.hasPrefix(marker) || trimmed.hasPrefix(";; [CrossKit]") else { return false }
         let rest = trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
         return testMarkerSymbols.contains { rest.hasPrefix($0) }
     }
@@ -306,27 +348,39 @@ public struct EditorCommandEngine: Sendable {
         guard response.ok else { throw EditorCommandError.bridge(response.error ?? "CrossKit request failed") }
 
         var operations: [BufferOperation] = markerLines.reversed().map { .replaceLines(start: $0, count: 1, with: []) }
-        var markers: [Int: String] = [:]   // clean line → marker text
+        var markers: [Int: [String]] = [:]   // clean line → marker texts
         let tests = response.tests ?? []
         var message: String?
         if let run = response.testRun {
             for result in run.tests {
                 guard let line = result.line, clean.indices.contains(line) else { continue }
-                markers[line] = Self.describe(result)
+                markers[line] = [Self.describe(result)]
             }
             message = Self.summary(run)
+            if let report = response.coverage {
+                message = Self.coverageSummary(report, run: run, file: buffer.filePath)
+                if let path = buffer.filePath, let file = report.file(path) {
+                    for range in file.uncoveredRanges {
+                        let line = range.lowerBound - 1
+                        guard clean.indices.contains(line) else { continue }
+                        let text = range.count == 1 ? "░ not covered" : "░ not covered: lines \(range.lowerBound)–\(range.upperBound)"
+                        markers[line, default: []].append(text)
+                    }
+                }
+            }
         } else {
             if tests.isEmpty { message = "No tests found in this file." }
             for test in tests where clean.indices.contains(test.line) {
-                markers[test.line] = "▶ test \(test.name.isEmpty ? test.filter : test.name) — Editor › CrossKit › Run Test at Cursor"
+                markers[test.line] = ["▶ test \(test.name.isEmpty ? test.filter : test.name) — Editor › CrossKit › Run Test at Cursor"]
             }
         }
         var inserted = 0
         for line in markers.keys.sorted(by: >) {
             let anchor = Self.attributeStart(clean, line)
             let indent = Self.indentation(of: clean[line])
-            operations.append(.replaceLines(start: anchor, count: 0, with: ["\(indent)\(Self.marker) \(markers[line]!)\n"]))
-            if anchor <= caretLine { inserted += 1 }
+            let texts = markers[line]!
+            operations.append(.replaceLines(start: anchor, count: 0, with: texts.map { "\(indent)\(Self.marker) \($0)\n" }))
+            if anchor <= caretLine { inserted += texts.count }
         }
         operations.append(.select(.caret(caretLine + inserted, caret.column)))
         return EditorOutcome(operations: operations, message: message)
@@ -369,6 +423,24 @@ public struct EditorCommandEngine: Sendable {
         }
         if let warning = run.warning { lines.append("⚠︎ " + warning) }
         lines.append("Details: CrossKit › Test Results")
+        return lines.joined(separator: "\n")
+    }
+
+    public static func coverageSummary(_ report: CoverageReport, run: TestRunResult, file: String?) -> String {
+        var lines = ["\(run.succeeded ? "✓" : "✗") \(run.language.displayName) · \(run.runner.displayName): \(run.summary)",
+                     String(format: "Coverage: %.1f%% of lines (%d/%d)", report.percent, report.linesHit, report.linesFound)]
+        if let file, let this = report.file(file) {
+            lines.append(String(format: "This file: %.1f%% (%d/%d), %d uncovered range%@ marked ░", this.percent, this.linesHit,
+                                this.linesFound, this.uncoveredRanges.count, this.uncoveredRanges.count == 1 ? "" : "s"))
+        }
+        let root = report.projectRoot
+        for item in report.files.sorted(by: { $0.percent < $1.percent }).prefix(6) {
+            let name = item.path.hasPrefix(root + "/") ? String(item.path.dropFirst(root.count + 1)) : item.path
+            lines.append(String(format: "  %5.1f%%  %@", item.percent, name))
+        }
+        if report.files.count > 6 { lines.append("  … \(report.files.count - 6) more files") }
+        if let warning = report.warning { lines.append("⚠︎ " + warning) }
+        lines.append("Details: CrossKit › Coverage")
         return lines.joined(separator: "\n")
     }
 
@@ -517,8 +589,10 @@ public struct EditorCommandEngine: Sendable {
         return "\(position)  \(preview.prefix(120))"
     }
 
+    /// A CrossKit comment line (`// [CrossKit]`, or `;; [CrossKit]` in WebAssembly text).
     public static func isAnnotation(_ line: String) -> Bool {
-        line.trimmingCharacters(in: .whitespaces).hasPrefix(marker)
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix(marker) || trimmed.hasPrefix(";; [CrossKit]")
     }
 
     static func split(_ line: String) -> (String, String) {

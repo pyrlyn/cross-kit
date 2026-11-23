@@ -92,6 +92,14 @@ public final class DebugService: @unchecked Sendable {
                 throw DebugError.noProgram("The Kotlin/Native link task produced no .kexe in \(directory).")
             }
             program = exe.path
+        case .cmakeTarget, .ctestCommand, .command:
+            if case .cmakeTarget(let build, _) = plan.programSource { plan.breakpoints = Self.compiledBreakpoints(plan.breakpoints, build: build) }
+            if case .ctestCommand(let build, _) = plan.programSource { plan.breakpoints = Self.compiledBreakpoints(plan.breakpoints, build: build) }
+            guard let resolved = try LaunchPlanner.resolveCommand(plan.programSource, plan: plan, inspector: nil) else {
+                throw DebugError.noProgram("Nothing to debug in \(file.lastPathComponent).")
+            }
+            program = resolved.executable
+            if !plan.debugger.isNode { plan.arguments = resolved.arguments }
         }
         if !plan.debugger.isJVM, !FileManager.default.isExecutableFile(atPath: program) {
             throw DebugError.noProgram("Program not found: \(program)")
@@ -122,6 +130,9 @@ public final class DebugService: @unchecked Sendable {
                 try terminalLauncher(script)
                 session.update { $0.state = .external }
                 info.message = "Started lldb in Terminal for \(plan.title); breakpoint at \(where_)."
+            case .nodeInspector, .nodeInspect, .nodeAttach:
+                info.message = try await startNode(session: session, plan: plan, where_: where_, directory: sessionDirectory)
+                info.jdwpAddress = session.snapshot.jdwpAddress
             case .jdb, .jdwpAttach:
                 plan.jdwpPort = plan.jdwpPort == 0 ? Self.freePort() : plan.jdwpPort
                 let address = "127.0.0.1:\(plan.jdwpPort)"
@@ -148,6 +159,107 @@ public final class DebugService: @unchecked Sendable {
             throw error
         }
         return info
+    }
+
+    static func compiledBreakpoints(_ breakpoints: [Breakpoint], build: String) -> [Breakpoint] {
+        breakpoints.map { Breakpoint(file: CMakeFileAPI.compiledPath($0.file, buildDirectory: URL(fileURLWithPath: build)), line: $0.line) }
+    }
+
+    // MARK: Node.js
+
+    /// Starts the program under `--inspect-brk` and connects CrossKit's inspector client, opens `node inspect`
+    /// in Terminal, or leaves it waiting for Chrome DevTools / VS Code.
+    private func startNode(session: DebugSession, plan: LaunchPlan, where_: String, directory: URL) async throws -> String {
+        let address = "127.0.0.1:\(Self.freePort())"
+        guard let command = try LaunchPlanner.resolveCommand(plan.programSource, plan: plan, inspector: "--inspect-brk=\(address)") else {
+            throw DebugError.noProgram("Nothing to debug.")
+        }
+        var env = planner.resolver.environment(language: plan.language, executable: URL(fileURLWithPath: command.executable))
+        if let node = planner.resolver.tools.node() {
+            env["PATH"] = node.deletingLastPathComponent().path + ":" + (env["PATH"] ?? "")
+        }
+        for (k, v) in plan.environment { env[k] = v }
+        env["NO_COLOR"] = "1"
+        let banner = BannerBox()
+        let process = try ChildProcess(
+            executable: command.executable, arguments: command.arguments, environment: env, currentDirectory: plan.workingDirectory,
+            onStdout: { [weak session] data in
+                guard !data.isEmpty else { return }
+                session?.appendOutput(String(decoding: data, as: UTF8.self))
+            },
+            onStderr: { [weak session] data in
+                guard !data.isEmpty else { return }
+                let text = String(decoding: data, as: UTF8.self)
+                if let url = CDPClient.webSocketURL(inBanner: text) { banner.set(url) }
+                // With a debugger attached Node.js waits after the program ends; let it exit.
+                if text.contains("Waiting for the debugger to disconnect") { session?.cdp?.close() }
+                let visible = text.components(separatedBy: "\n").filter {
+                    !$0.hasPrefix("Debugger listening on") && !$0.hasPrefix("For help, see: https://nodejs.org")
+                        && !$0.hasPrefix("Debugger attached.") && !$0.hasPrefix("Waiting for the debugger to disconnect")
+                }.joined(separator: "\n")
+                if !visible.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { session?.appendOutput(visible) }
+            },
+            onExit: { [weak session] code in
+                session?.update { s in
+                    s.exitCode = Int(code)
+                    if s.state.isActive || s.state == .waitingForDebugger { s.state = .exited }
+                    s.frames = []; s.variables = []
+                }
+            })
+        process.closeStdin()
+        session.jvm = process
+        session.update { $0.debuggeePID = Int(process.pid); $0.jdwpAddress = address }
+        let deadline = Date().addingTimeInterval(60)
+        var url: URL?
+        while url == nil {
+            url = banner.value
+            if url != nil { break }
+            if !process.isRunning {
+                throw DebugError.launchFailed("Node.js exited before the inspector started.\n\(String(session.snapshot.output.suffix(2000)))")
+            }
+            if Date() > deadline { throw DebugError.launchFailed("Node.js did not open the inspector on \(address) within 60s.") }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        switch plan.debugger {
+        case .nodeInspector:
+            let harness = plan.wasmBinary == nil ? nil : planner.workDirectory.appendingPathComponent("wasm/crosskit-harness.mjs").path
+            try await session.startInspector(webSocket: url!, plan: plan, harness: harness)
+            return "Debugging \(plan.title) with the Node.js inspector; breakpoint at \(where_). Controls are in CrossKit › Debugger."
+        case .nodeInspect:
+            let node = planner.resolver.tools.node()?.path ?? "node"
+            let script = try writeNodeInspectScript(node: node, address: address, plan: plan, directory: directory)
+            try terminalLauncher(script)
+            session.update { $0.attachCommand = "\(Self.shellQuote(node)) inspect \(address)"; $0.state = .waitingForDebugger }
+            return "Started \(plan.title) paused on \(address); `node inspect` opened in Terminal. Set the breakpoint there (the command is shown in the window), then `c`."
+        default:
+            session.update {
+                $0.attachCommand = "Chrome: chrome://inspect → Configure… → \(address); VS Code: “Attach to Node Process” or an attach configuration with port \(address.split(separator: ":").last ?? "")"
+                $0.state = .waitingForDebugger
+            }
+            return "\(plan.title) waits for a debugger on \(address) (Node.js inspector). Attach from Chrome DevTools (chrome://inspect) or VS Code and set a breakpoint at \(where_)."
+        }
+    }
+
+    func writeNodeInspectScript(node: String, address: String, plan: LaunchPlan, directory: URL) throws -> URL {
+        let script = directory.appendingPathComponent("CrossKit Debug.command")
+        let bp = plan.breakpoints.first
+        let hint = bp.map { "sb('\(($0.file as NSString).lastPathComponent)', \($0.line + 1))" } ?? ""
+        try """
+        #!/bin/sh
+        # CrossKit: \(Self.commentLine(plan.title))
+        echo "CrossKit: set the breakpoint with  \(hint)  then continue with  c"
+        exec \(Self.shellQuote(node)) inspect \(address)
+
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return script
+    }
+
+    private final class BannerBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var url: URL?
+        func set(_ value: URL) { lock.withLock { if url == nil { url = value } } }
+        var value: URL? { lock.withLock { url } }
     }
 
     // MARK: JVM

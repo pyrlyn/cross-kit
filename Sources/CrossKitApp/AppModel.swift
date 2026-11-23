@@ -28,6 +28,12 @@ final class AppModel: ObservableObject {
     @Published var previewRendering = false
     @Published var previewError: String?
     var previewFileDate: Date?
+    @Published var inspection: InspectionResult?
+    @Published var inspectionError: String?
+    @Published var inspecting = false
+    /// The Preview window shows the latest of a Compose preview and a file inspection.
+    @Published var previewShowsInspection = false
+    @Published var coverageReports: [CoverageReport] = []
 
     private init() {
         manager = ServerManager(settings: settings, locator: locator)
@@ -45,6 +51,12 @@ final class AppModel: ObservableObject {
         }
         handler.onPreview = { result in
             Task { @MainActor in AppModel.shared.showPreview(result) }
+        }
+        handler.onInspection = { result in
+            Task { @MainActor in AppModel.shared.showInspection(result) }
+        }
+        handler.onCoverage = { report in
+            Task { @MainActor in AppModel.shared.showCoverage(report) }
         }
         for language in Language.allCases {
             var status = ServerStatus(state: settings.isEnabled(language) ? .stopped : .disabled)

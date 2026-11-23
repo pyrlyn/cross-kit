@@ -126,6 +126,170 @@ final class DebugEndToEndTests: XCTestCase {
                                 expectVariables: ["value": "3"], expectExit: 0)
     }
 
+    // MARK: C++ with lldb-dap
+
+    static let cppSource = """
+    #include <cstdio>
+
+    static int add(int a, int b) {
+        int sum = a + b;
+        return sum;
+    }
+
+    int main() {
+        int result = add(40, 2);
+        std::printf("result %d\\n", result);
+        return 0;
+    }
+
+    """
+
+    func testCppDebugFileWithLLDBDAP() async throws {
+        guard ToolFinder().clangxx() != nil else { throw XCTSkip("clang++ not found") }
+        guard DebuggerLocator().find(.lldbDAP) != nil else { throw XCTSkip("lldb-dap not found") }
+        let h = try makeHarness("cpp", files: ["main.cpp": Self.cppSource])
+        defer { h.tearDown() }
+        h.settings.setDebugger(.lldbDAP, for: .cpp)
+        try await runDAPSession(h, command: .debugFileAtCursor, buffer: h.buffer("main.cpp", line: 4), expectLine: 5,
+                                expectVariables: ["a": "40", "b": "2"], expectExit: 0)
+    }
+
+    func testCppDebugCTestWithLLDBDAP() async throws {
+        let tools = ToolFinder()
+        guard tools.clangxx() != nil, tools.cmake() != nil, tools.ctest() != nil else { throw XCTSkip("clang++/cmake/ctest not found") }
+        guard DebuggerLocator().find(.lldbDAP) != nil else { throw XCTSkip("lldb-dap not found") }
+        let test = """
+        #include "mini_test.h"
+
+        static int add(int a, int b) { return a + b; }
+
+        TEST(Math, adds) {
+            int value = add(1, 2);
+            EXPECT_EQ(value, 3);
+        }
+
+        int main(int argc, char** argv) { return miniMain(argc, argv); }
+
+        """
+        let cmake = """
+        cmake_minimum_required(VERSION 3.16)
+        project(sample CXX)
+        set(CMAKE_CXX_STANDARD 17)
+        enable_testing()
+        add_executable(math_test math_test.cpp)
+        add_test(NAME Math.adds COMMAND math_test Math.adds)
+
+        """
+        let h = try makeHarness("cpp-ctest", files: ["CMakeLists.txt": cmake, "mini_test.h": TestRunEndToEndTests.miniTestHeader, "math_test.cpp": test])
+        defer { h.tearDown() }
+        h.settings.setDebugger(.lldbDAP, for: .cpp)
+        try await runDAPSession(h, command: .debugTestAtCursor, buffer: h.buffer("math_test.cpp", line: 6), expectLine: 7,
+                                expectVariables: ["value": "3"], expectExit: 0)
+        // Debug File at Cursor in a CMake project: the executable target that compiles the file.
+        try await runDAPSession(h, command: .debugFileAtCursor, buffer: h.buffer("math_test.cpp", line: 6), expectLine: 7,
+                                expectVariables: ["value": "3"], expectExit: 0)
+    }
+
+    // MARK: JavaScript / TypeScript / WebAssembly with the Node.js inspector
+
+    func testJavaScriptDebugFileWithNodeInspector() async throws {
+        guard ToolFinder().node() != nil else { throw XCTSkip("node not found") }
+        let source = "function add(a, b) {\n  const sum = a + b;\n  return sum;\n}\n\nconst result = add(40, 2);\nconsole.log(`result ${result}`);\n"
+        let h = try makeHarness("js", files: ["main.js": source])
+        defer { h.tearDown() }
+        try await runDAPSession(h, command: .debugFileAtCursor, buffer: h.buffer("main.js", line: 2), expectLine: 3,
+                                expectVariables: ["a": "40", "b": "2", "sum": "42"], expectExit: 0)
+        XCTAssertTrue(h.handler.debugService.allSessions.contains { $0.snapshot.output.contains("result 42") })
+    }
+
+    func testTypeScriptDebugTestWithNodeInspector() async throws {
+        let tools = ToolFinder()
+        guard let node = tools.node(), tools.nodeRunsTypeScript(node) else { throw XCTSkip("Node.js 23.6+ not found") }
+        let source = """
+        import { test } from "node:test";
+        import assert from "node:assert/strict";
+
+        function add(a: number, b: number): number {
+          return a + b;
+        }
+
+        test("adds", () => {
+          const value = add(1, 2);
+          assert.equal(value, 3);
+        });
+
+        """
+        let h = try makeHarness("ts", files: ["package.json": "{ \"type\": \"module\" }\n", "math.test.ts": source])
+        defer { h.tearDown() }
+        h.settings.setTestRunner(.nodeTest, for: .typescript)
+        try await runDAPSession(h, command: .debugTestAtCursor, buffer: h.buffer("math.test.ts", line: 9), expectLine: 10,
+                                expectVariables: ["value": "3"], expectExit: 0)
+    }
+
+    func testTypeScriptDebugTestWithVitest() async throws {
+        let tools = ToolFinder()
+        guard tools.node() != nil, tools.nodePackageBinary("vitest", projectRoot: nil) != nil else { throw XCTSkip("vitest not found") }
+        let source = """
+        function add(a: number, b: number): number {
+          return a + b;
+        }
+
+        describe("math", () => {
+          it("adds", () => {
+            const value = add(1, 2);
+            expect(value).toBe(3);
+          });
+        });
+
+        """
+        let h = try makeHarness("vitest", files: ["package.json": "{ \"type\": \"module\" }\n", "math.test.ts": source])
+        defer { h.tearDown() }
+        h.settings.setTestRunner(.vitest, for: .typescript)
+        h.settings.setTestArguments(["--globals"], for: .typescript)
+        try await runDAPSession(h, command: .debugTestAtCursor, buffer: h.buffer("math.test.ts", line: 7), expectLine: 8,
+                                expectVariables: ["value": "3"], expectExit: 0)
+    }
+
+    func testWasmDebugWithNodeInspector() async throws {
+        let tools = ToolFinder()
+        guard tools.node() != nil, tools.wasmTools() != nil else { throw XCTSkip("node and wasm-tools needed") }
+        let wat = """
+        (module
+          (func $add (export "add") (param $a i32) (param $b i32) (result i32)
+            local.get $a
+            local.get $b
+            i32.add)
+
+          (func (export "main") (result i32)
+            i32.const 40
+            i32.const 2
+            call $add)
+        )
+
+        """
+        let h = try makeHarness("wasm", files: ["math.wat": wat])
+        defer { h.tearDown() }
+        try await runDAPSession(h, command: .debugFileAtCursor, buffer: h.buffer("math.wat", line: 3), expectLine: 4,
+                                expectVariables: ["$a": "40", "$b": "2"], expectExit: 0)
+    }
+
+    func testNodeInspectOpensTerminal() async throws {
+        guard ToolFinder().node() != nil else { throw XCTSkip("node not found") }
+        let h = try makeHarness("node-inspect", files: ["main.js": "const x = 1;\nconsole.log(x);\n"])
+        defer { h.tearDown() }
+        h.settings.setDebugger(.nodeInspect, for: .javascript)
+        let outcome = try await EditorCommandEngine().run(.debugFileAtCursor, buffer: h.buffer("main.js", line: 1), transport: h.transport)
+        XCTAssertTrue(outcome.message?.contains("node inspect") == true, outcome.message ?? "")
+        let script = try XCTUnwrap(h.scripts.last)
+        let text = try String(contentsOf: script, encoding: .utf8)
+        XCTAssertTrue(text.contains("inspect 127.0.0.1:"), text)
+        XCTAssertTrue(text.contains("sb('main.js', 2)"), text)
+        let session = try XCTUnwrap(h.handler.debugService.allSessions.first)
+        XCTAssertEqual(session.snapshot.state, .waitingForDebugger)
+        await session.stop()
+        XCTAssertTrue(ProcessRegistry.activeGroups().isEmpty, "node must not outlive the session")
+    }
+
     private func runDAPSession(_ h: Harness, command: EditorCommand, buffer: EditorBuffer, expectLine: Int,
                                expectVariables: [String: String], expectExit: Int) async throws {
         let outcome = try await EditorCommandEngine().run(command, buffer: buffer, transport: h.transport)

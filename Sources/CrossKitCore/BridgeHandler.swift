@@ -15,10 +15,16 @@ public final class BridgeHandler: @unchecked Sendable {
     public var debugService: DebugService
     public var runService: RunService
     public var previewService: PreviewService
+    public var inspectService: InspectService
+    public var coverageService: CoverageService
     /// Called with every finished test run (the host shows them in its Test Results window).
     public var onTestRun: (@Sendable (TestRunResult) -> Void)?
     /// Called with every preview render (the host shows its Preview window).
     public var onPreview: (@Sendable (PreviewResult) -> Void)?
+    /// Called with every inspection (C++/JavaScript/TypeScript/WebAssembly previews).
+    public var onInspection: (@Sendable (InspectionResult) -> Void)?
+    /// Called with every coverage report (the host shows its Coverage window).
+    public var onCoverage: (@Sendable (CoverageReport) -> Void)?
 
     public init(manager: ServerManager, settings: SettingsStore, scratchDirectory: URL = SharedPaths.scratchDirectory) {
         self.manager = manager
@@ -30,6 +36,8 @@ public final class BridgeHandler: @unchecked Sendable {
         self.debugService = DebugService(planner: planner)
         self.runService = RunService(planner: planner)
         self.previewService = PreviewService(planner: planner)
+        self.inspectService = InspectService(tools: resolver.tools, workDirectory: resolver.workDirectory)
+        self.coverageService = CoverageService(tests: testService)
     }
 
     public func handle(_ request: BridgeRequest) async -> BridgeResponse {
@@ -80,6 +88,31 @@ public final class BridgeHandler: @unchecked Sendable {
                 : try await runService.runFile(language: language, file: resolved, text: request.text)
             return response
         }
+        if request.operation == .coverage {
+            guard let file else { throw TestRunnerError.needsSavedFile }
+            let resolved = file.resolvingSymlinksInPath()
+            var response = BridgeResponse()
+            response.language = language
+            response.filePath = resolved.path
+            response.tests = testService.discover(language, file: resolved, text: request.text)
+            let report = try await coverageService.run(language, file: resolved, text: request.text,
+                                                       scope: request.testScope ?? .file, cursorLine: request.line)
+            if let run = report.testRun { onTestRun?(run) }
+            onCoverage?(report)
+            response.coverage = report
+            response.testRun = report.testRun
+            return response
+        }
+        if request.operation == .preview, InspectService.supports(language) {
+            guard let file else { throw DebugError.needsSavedFile }
+            var response = BridgeResponse()
+            response.language = language
+            response.filePath = file.resolvingSymlinksInPath().path
+            let result = try await inspectService.inspect(language: language, file: file.resolvingSymlinksInPath(), text: request.text)
+            onInspection?(result)
+            response.inspection = result
+            return response
+        }
         if request.operation == .preview {
             guard language == .kotlin else { throw BridgeError.unsupported("Compose previews are available for Kotlin files only.") }
             guard let file else { throw DebugError.needsSavedFile }
@@ -122,7 +155,7 @@ public final class BridgeHandler: @unchecked Sendable {
         let timeout = language.requestTimeout
 
         switch request.operation {
-        case .ping, .discoverTests, .runTests, .debugFile, .debugTest, .build, .run, .preview:
+        case .ping, .discoverTests, .runTests, .debugFile, .debugTest, .build, .run, .preview, .coverage:
             break
         case .inlineAnnotations:
             let options = settings.inlineOptions

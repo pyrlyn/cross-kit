@@ -100,7 +100,7 @@ struct LanguageSection: View {
                 LabeledContent("Features") {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(Feature.allCases.filter { $0.applies(to: language) }) { feature in
-                            Toggle(feature.displayName, isOn: model.featureBinding(feature, language))
+                            Toggle(feature.displayName(for: language), isOn: model.featureBinding(feature, language))
                                 .toggleStyle(.checkbox)
                         }
                     }
@@ -136,7 +136,10 @@ struct LanguageSection: View {
             }
             .disabled(!enabled.wrappedValue)
         } header: {
-            Text(language.displayName)
+            HStack(spacing: 6) {
+                FileIconView(language: language, size: 18)
+                Text(language.displayName)
+            }
         }
     }
 

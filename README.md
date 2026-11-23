@@ -1,14 +1,18 @@
 # CrossKit
 
-CrossKit is an Xcode Source Editor Extension that bridges Xcode to Language Server Protocol (LSP) servers for **Kotlin**, **Zig**, and **Rust**:
+CrossKit is an Xcode Source Editor Extension that bridges Xcode to Language Server Protocol (LSP) servers for **Kotlin**, **Zig**, **Rust**, **C++**, **JavaScript**, **TypeScript**, and **WebAssembly** text:
 
 | Language | Server | File extensions (default) |
 |---|---|---|
 | Kotlin | [`kotlin-language-server`](https://github.com/fwcd/kotlin-language-server) | `.kt`, `.kts` |
 | Zig | [`zls`](https://github.com/zigtools/zls) | `.zig` |
 | Rust | [`rust-analyzer`](https://rust-analyzer.github.io) | `.rs` |
+| C++ | [`clangd`](https://clangd.llvm.org) | `.cpp`, `.cc`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx`, `.ipp`, `.tpp` |
+| JavaScript | [`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server) | `.js`, `.mjs`, `.cjs`, `.jsx` |
+| TypeScript | `typescript-language-server` (or TypeScript 7's `tsc --lsp`) | `.ts`, `.mts`, `.cts`, `.tsx` |
+| WebAssembly | [`wat_server`](https://github.com/g-plane/wasm-language-tools) | `.wat`, `.wast` |
 
-It provides completion, go to definition, find references, diagnostics, and hover info as **Editor › CrossKit** menu commands, which you can bind to keys. It also runs tests with each language's native runner (`zig test` / `zig build test`, `cargo test` / `cargo nextest`, JUnit 5 through Gradle) starts debug sessions (lldb-dap, lldb, CodeLLDB, or JDWP with jdb), builds and runs programs, handles Kotlin Multiplatform JVM and Kotlin/Native targets, renders Compose Multiplatform `@Preview` functions in a Preview window, and approximates Code Lens, inlay hints, and ErrorLens with `// [CrossKit]` comments. A detailed user guide is in [docs/GUIDE.md](docs/GUIDE.md). Everything is configured in a native settings window, so you never edit a config file. CrossKit makes no network calls; it only launches local server binaries.
+It provides completion, go to definition, find references, diagnostics, and hover info as **Editor › CrossKit** menu commands, which you can bind to keys. It also runs tests with each language's native runner (`zig test` / `zig build test`, `cargo test` / `cargo nextest`, JUnit 5 through Gradle) starts debug sessions (lldb-dap, lldb, CodeLLDB, or JDWP with jdb), builds and runs programs, handles Kotlin Multiplatform JVM and Kotlin/Native targets, renders Compose Multiplatform `@Preview` functions in a Preview window, and approximates Code Lens, inlay hints, and ErrorLens with `// [CrossKit]` comments. C++ (CMake/CTest with GoogleTest or Catch2, lldb-dap), JavaScript/TypeScript (Vitest, Jest, node:test, bun; the Node.js inspector), and WebAssembly (wasmtime, a Node.js harness, `.wast` scripts) also get code coverage in a Coverage window (llvm-cov, V8/istanbul LCOV, instrumented WAT) and file inspections in the Preview window (assembly, symbols, emitted JavaScript, WAT, hex). Source files are shown with macOS-style document icons in CrossKit's windows. A detailed user guide is in [docs/GUIDE.md](docs/GUIDE.md). Everything is configured in a native settings window, so you never edit a config file. CrossKit makes no network calls; it only launches local server binaries.
 
 ## How it works
 
@@ -72,6 +76,15 @@ mise install zls@0.17          # or download from https://github.com/zigtools/zl
 # Kotlin (needs a JDK; 17 or 21 recommended)
 mise install github:fwcd/kotlin-language-server@latest
 # or unzip server.zip from https://github.com/fwcd/kotlin-language-server/releases
+
+# C++: clangd ships with Xcode / the Command Line Tools; CMake for tests and coverage
+mise use -g cmake@latest
+
+# JavaScript / TypeScript (Node.js 23.6+ runs TypeScript directly)
+mise use -g node@lts npm:typescript npm:typescript-language-server
+
+# WebAssembly text
+mise use -g github:g-plane/wasm-language-tools wasmtime github:bytecodealliance/wasm-tools
 ```
 
 If a server is installed somewhere unusual, use **Choose…** in settings to point at it.
@@ -117,7 +130,8 @@ CROSSKIT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" xcodebuild
 | Debug Test at Cursor | – | Builds and debugs only the test that encloses the cursor. |
 | Build Project | – | Builds the project (or loose file) for the current language and Kotlin target; the alert shows success or the compiler output. |
 | Run File | – | Builds and runs the file's `main`; short runs show their output in the alert, long ones keep running in the Run window. |
-| Show Compose Preview at Cursor | – | Renders the file's `@Preview` composables to PNG on the desktop JVM and shows them in the Preview window, focused on the one at the cursor. |
+| Run Tests with Coverage | – | Runs the file's tests (or the one at the cursor) with coverage, marks uncovered blocks with `░ not covered: lines a–b`, and opens the Coverage window. C++, JavaScript, TypeScript, WebAssembly. |
+| Show Preview | – | Kotlin: renders the file's `@Preview` composables to PNG on the desktop JVM and shows them in the Preview window, focused on the one at the cursor. C++, JS/TS, WebAssembly: shows the file's inspection tabs (assembly, symbols, emitted JavaScript, WAT, …). |
 | Show Code Lenses | `textDocument/documentSymbol`, `textDocument/references` | Inserts `// [CrossKit] ◆ N references · ▶ Run · ⚙ Debug` above declarations (Run Test / Debug Test above tests, Preview above previews). |
 | Show Inlay Hints | `textDocument/inlayHint` | Inserts type and parameter hints above the line (`‹: i32›`) or at its end (`  // [CrossKit] » total: i32, a: 1`). |
 | Show ErrorLens Diagnostics | diagnostics | Appends the most severe diagnostic of each line at its end: `  // [CrossKit] ✖ error: …`. |
@@ -126,7 +140,7 @@ CROSSKIT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" xcodebuild
 | Clear CrossKit Annotations | – | Removes every `// [CrossKit]` line and trailing `// [CrossKit]` segment. |
 | Open CrossKit Settings | – | Brings up the host app. |
 
-Annotation lines are ordinary `//` comments in all three languages and always start with `// [CrossKit]`, so you can remove them with one command. Undo works as usual.
+Annotation lines are ordinary `//` comments and always start with `// [CrossKit]` (`;; [CrossKit]` in WebAssembly text), so you can remove them with one command. Undo works as usual.
 
 ## Running tests
 
@@ -135,6 +149,9 @@ Annotation lines are ordinary `//` comments in all three languages and always st
 | Zig | `zig build test` when the project has `build.zig`, otherwise `zig test <file>` (with `--test-filter` for one test) | `test "name" { … }`, `test name { … }`, and unnamed `test { … }` blocks |
 | Rust | `cargo nextest run` when cargo-nextest is installed, otherwise `cargo test` | `#[test]`, `#[tokio::test]`, and similar attributes inside nested `mod`s; when rust-analyzer is available, its `experimental/runnables` supply the exact test paths and cargo arguments |
 | Kotlin | `./gradlew test` when the project has a wrapper, otherwise `gradle test`; filtered with `--tests` | `@Test`, `@ParameterizedTest`, `@RepeatedTest`, and `@TestFactory` functions, including `@Nested` inner classes |
+| C++ | CMake + CTest (`ctest -R … --output-junit`) in a CrossKit build folder | GoogleTest `TEST`/`TEST_F`/`TEST_P`/`TYPED_TEST`, Catch2/doctest `TEST_CASE`/`SCENARIO` |
+| JavaScript, TypeScript | `bun:test`/`node:test` imports, then Vitest or Jest from imports or `package.json`, then `node --test` | `test`/`it` inside `describe`/`suite`, with `.only`/`.skip` |
+| WebAssembly | `wasmtime run --invoke` (or the Node.js harness) for exported `test*` functions; `wasmtime wast` for `.wast` | `(export "test…")` functions, `assert_*` directives |
 
 Every run also appears in the host app's **Test Results** window: the command, working directory, duration, full output, and a table of tests with status, time, failure output, and a `file:line` button that opens the test in Xcode. Gradle results come from the JUnit XML reports in `build/test-results/test` (`build/test-results/<target>Test` in Multiplatform modules). If a runner or toolchain is missing, the alert says what to install or which setting to change. Tests run against the saved file, and you get a warning if the buffer has unsaved changes. Runs time out after the configured test timeout (15 minutes by default); the whole process group is then stopped.
 
@@ -147,6 +164,9 @@ Every run also appears in the host app's **Test Results** window: the command, w
 | Zig | `zig build-exe` / `zig build install`; tests via `zig test --test-filter … --test-no-exec` | lldb-dap (managed by CrossKit, Debugger window), lldb in Terminal, or CodeLLDB |
 | Rust | `cargo build` / `cargo test --no-run`, executable taken from Cargo's JSON output | the same |
 | Kotlin | Gradle compiles and reports the runtime classpath; the JVM starts with a JDWP agent (`suspend=y`); tests run via Gradle with the agent in the test JVM | jdb in Terminal (already attached, breakpoint set), or wait for an IDE to attach |
+| C++ | CMake Debug build (target found with CMake's File API, test command from `ctest --show-only=json-v1`), or `clang++ -g -O0` for a loose file | lldb-dap, lldb in Terminal, or CodeLLDB |
+| JavaScript, TypeScript | none (TypeScript runs with Node.js type stripping); tests in-process with node:test, Vitest, or Jest | Node.js inspector in the Debugger window (CDP), `node inspect` in Terminal, or wait for Chrome DevTools / VS Code |
+| WebAssembly | `.wat` → `.wasm` with `wasm-tools`/`wat2wasm`, run in a Node.js harness | Node.js inspector with `.wat` line mapping; lldb + `wasmtime -D debug-info` for modules with DWARF |
 
 The host app's **Debugger** window shows sessions with Continue / Step Over / Step Into / Step Out / Pause / Stop, the call stack (click to open the line in Xcode), local variables, and program output. Debuggers are auto-detected from Xcode, the Command Line Tools, Homebrew LLVM, and VS Code/Cursor extensions (CodeLLDB), and can be overridden per language. Each project gets an auto-saved **launch configuration** (program or main class, arguments, environment, working directory, test binary arguments), editable in the settings window. Stopping a session, a program exit, or quitting CrossKit leaves no processes behind.
 
@@ -171,6 +191,7 @@ These are XcodeKit constraints and the workarounds CrossKit uses:
 * **Cold start.** The first request per language waits for the server to start; Kotlin takes the longest. Empty results during the first minute are retried briefly while the server indexes.
 * **Kotlin targets** come from a simple parse of `build.gradle(.kts)`; targets declared in convention plugins need to be named in the settings or launch configuration. Only the host macOS target runs; other native targets can only be built.
 * **Compose previews** render on the desktop JVM: no Android resources, `@PreviewParameter`, multipreview annotations, interaction, or animation.
+* **New languages:** C++ tests and coverage need CMake; Vitest coverage needs `@vitest/coverage-v8`; bun tests cannot be debugged; WebAssembly line mapping inside functions is approximate. Xcode's own navigator icons cannot be changed by an extension. See the guide's chapter 19.
 * **Signing.** Ad-hoc signed builds are meant for local use. For distribution, sign with a Developer ID, ideally with a provisioning profile for the App Group, and notarize.
 * **Not covered by automated tests.** The XcodeKit glue (`SourceEditorCommand`) can only run inside Xcode. Everything below it, from the editor command engine through the bridge, server manager, and real servers, is covered by tests.
 
@@ -198,6 +219,9 @@ scripts/test.sh
 * **Debugging end-to-end tests** (`DebugEndToEndTests`): Zig and Rust debug a program and a single test through lldb-dap, check that the breakpoint is hit at the right line with the right local variables, run to a clean exit, and check that no adapter or debuggee process is left. A Zig test also runs the generated lldb Terminal script in batch mode. Two Kotlin tests (a program, and a JUnit test via Gradle) start the JVM with JDWP, attach jdb exactly like the Terminal script, hit the breakpoint, read the locals, and exit cleanly.
 * **Feature unit tests** (`FeatureUnitTests.swift`): Kotlin target parsing and selection, task and output paths, Native and JVM launch plans (link tasks, `--ktest_filter`, `-Pcrosskit.target`, launch-config overrides, non-host errors, Gradle daemon flags), Multiplatform test tasks, `@Preview` discovery, inline annotation placement, merging, refresh, clear, unsafe line ends, LSP inlay-hint and symbol conversion, Build/Run/Preview command messages, and settings round trips.
 * **Feature end-to-end tests** (`FeatureEndToEndTests`), with fixtures in `build/e2e` and the Gradle daemon off: Zig and Rust Build Project and Run File; a Kotlin Multiplatform project built, run, tested, and debugged with lldb-dap on Kotlin/Native (`macosArm64`), then run and tested on the JVM; a Compose Multiplatform module whose three previews are rendered to PNGs of the expected size; and Code Lens, inlay hints, ErrorLens, refresh, and clear against rust-analyzer and zls. Each skips when its toolchain (or, for Kotlin, its offline Gradle caches; set `CROSSKIT_E2E_NETWORK=1` to allow downloads) is missing.
+* **Language unit tests** (`LanguageUnitTests.swift`): C++/JS/TS/WebAssembly test discovery, CTest regexes and CMake File API parsing, JUnit/Jest/wasmtime/`.wast` result parsing, WAT function lookup and coverage instrumentation, the `.wasm` binary reader, LCOV parsing and uncovered ranges, `;; [CrossKit]` marker mapping, Chrome DevTools Protocol helpers, debugger choices, and file icon styles.
+* **Coverage end-to-end tests** (`CoverageEndToEndTests`): **Run Tests with Coverage** for a CMake/C++ project (llvm-cov), TypeScript and JavaScript (node:test, V8 LCOV), and WebAssembly (instrumented WAT through the Node.js harness), plus the inspection tabs of every new language.
+* The LSP, test-running and debugging end-to-end suites also cover clangd, typescript-language-server (JS and TS), wat_server, CTest, node:test, Vitest, wasmtime, the Node.js harness, `.wast`, lldb-dap for C++ files and CTest tests, and the Node.js inspector for JavaScript, TypeScript, Vitest, and WebAssembly.
 * **Test-running end-to-end tests** (`TestRunEndToEndTests`), one per language: a temporary project with one passing and one failing test is run through the bridge with **Run Tests in File** and **Run Test at Cursor**, checking statuses, failure output, `file:line` links, and markers. Each test skips if its toolchain is missing. The Kotlin test passes `--offline` when JUnit is already in the Gradle cache.
 
 ## Layout
@@ -210,9 +234,12 @@ Sources/CrossKitCore/Testing/    test discovery, runners, result parsers
 Sources/CrossKitCore/Debugging/  debugger detection, launch planning, DAP client, debug sessions
 Sources/CrossKitCore/Kotlin/     Kotlin Multiplatform target parsing and selection
 Sources/CrossKitCore/Running/    Build Project and Run File
-Sources/CrossKitCore/Preview/    @Preview discovery, embedded renderer, preview rendering
+Sources/CrossKitCore/Preview/    @Preview discovery, embedded renderer, preview rendering, file inspections
+Sources/CrossKitCore/Coverage/   coverage runs, LCOV/llvm-cov/WAT counter collection
+Sources/CrossKitCore/Wasm/       WAT scanning and instrumentation, .wasm reader, Node.js harness
+Sources/CrossKitCore/Icons/      file icon styles (badge and colours per file type)
 Sources/CrossKitCore/Annotations/ Code Lens, inlay hint, and ErrorLens comment placement
-Sources/CrossKitApp/             host app: settings, Test Results, Debugger, Run and Preview windows, menu bar, Xcode lookup
+Sources/CrossKitApp/             host app: settings, Test Results, Debugger, Run, Preview and Coverage windows, file icons, menu bar, Xcode lookup
 docs/GUIDE.md                    detailed user guide
 Sources/CrossKitExtension/       XcodeKit extension (commands → bridge → buffer edits)
 Tests/CrossKitCoreTests/         unit + end-to-end tests

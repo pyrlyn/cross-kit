@@ -86,6 +86,7 @@ public struct LaunchPlanner: Sendable {
             // A user-chosen program: launch it as is.
             return plan
         } else if purpose != .build, config.program.isEmpty, !TestDiscovery.hasMain(language, text: text),
+                  language != .wasm, !(language == .cpp && CppTesting.projectRoot(for: file) != nil),
                   !(language == .rust && rustHasBinary(root)), !(kotlinTarget?.target.platform == .native) {
             throw DebugError.noMain(file.lastPathComponent)
         }
@@ -96,6 +97,9 @@ public struct LaunchPlanner: Sendable {
         case .kotlin:
             try planKotlin(&plan, file: file, root: root, test: test, config: config, text: text, cursorLine: cursorLine,
                            project: kotlinTarget!.project, kotlinTarget: kotlinTarget!.target, purpose: purpose)
+        case .cpp: try planCpp(&plan, file: file, root: root, test: test, config: config, text: text, purpose: purpose)
+        case .javascript, .typescript: try planScript(&plan, file: file, root: root, test: test, config: config, text: text, purpose: purpose)
+        case .wasm: try planWasm(&plan, file: file, root: root, test: test, config: config, text: text, purpose: purpose)
         }
         return plan
     }

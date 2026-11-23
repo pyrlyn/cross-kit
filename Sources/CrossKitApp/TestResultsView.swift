@@ -13,6 +13,7 @@ struct TestResultsView: View {
                     HStack {
                         Image(systemName: run.succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill")
                             .foregroundStyle(run.succeeded ? .green : .red)
+                        if let path = run.filePath { FileIconView(path: path, size: 16) } else { FileIconView(language: run.language, size: 16) }
                         Text("\(run.language.displayName) · \((run.filePath as NSString?)?.lastPathComponent ?? "")")
                             .fontWeight(.medium)
                     }
@@ -64,16 +65,19 @@ private struct RunDetail: View {
                 .width(70)
                 TableColumn("Location") { test in
                     if let file = test.file, let line = test.line {
+                        HStack(spacing: 4) {
+                        FileIconView(path: file, size: 14)
                         Button("\((file as NSString).lastPathComponent):\(line + 1)") {
                             XcodeDocumentLocator.open(BridgeLocation(path: file, range: BridgeRange(
                                 startLine: line, startCharacter: 0, endLine: line, endCharacter: 0)))
                         }
                         .buttonStyle(.link)
+                        }
                     } else {
                         Text("–")
                     }
                 }
-                .width(140)
+                .width(160)
             }
             .frame(minHeight: 140)
             Text(selectedTest == nil ? "Runner output" : "Output of \(selectedTest!)").font(.subheadline)

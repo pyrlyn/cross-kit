@@ -102,6 +102,7 @@ struct ProgramRunDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                FileIconView(language: run.language, size: 24)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(run.title).font(.headline)
                     Text("\(run.language.displayName)\(run.target.map { " · \($0)" } ?? "") · \(run.projectRoot)")

@@ -35,6 +35,19 @@ public struct TestToolchain: Sendable {
         case .zig: return [("zig", zig()?.path)]
         case .rust: return [("cargo", cargo()?.path), ("cargo-nextest", cargoNextest()?.path)]
         case .kotlin: return [("gradle", gradle()?.path), ("java", locator.javaHome()?.appendingPathComponent("bin/java").path)]
+        case .cpp:
+            let tools = ToolFinder(locator: locator)
+            let clang = tools.clangxx()
+            return [("cmake", tools.cmake()?.path), ("ctest", tools.ctest()?.path), ("clang++", clang?.path),
+                    ("llvm-cov", tools.llvmTool("llvm-cov", matching: clang)?.path)]
+        case .javascript, .typescript:
+            let tools = ToolFinder(locator: locator)
+            return [("node", tools.node()?.path), ("vitest", tools.nodePackageBinary("vitest", projectRoot: nil)?.path),
+                    ("jest", tools.nodePackageBinary("jest", projectRoot: nil)?.path), ("bun", tools.bun()?.path)]
+        case .wasm:
+            let tools = ToolFinder(locator: locator)
+            return [("wasmtime", tools.wasmtime()?.path), ("wasm-tools", tools.wasmTools()?.path),
+                    ("wat2wasm", tools.wabt("wat2wasm")?.path), ("node", tools.node()?.path)]
         }
     }
 }
@@ -43,11 +56,16 @@ public struct TestToolchain: Sendable {
 public struct TestRunnerResolver: Sendable {
     public var settings: SettingsStore
     public var toolchain: TestToolchain
+    /// CrossKit's own build trees (CMake), test reports and coverage data live here.
+    public var workDirectory: URL
 
-    public init(settings: SettingsStore, toolchain: TestToolchain = TestToolchain()) {
+    public init(settings: SettingsStore, toolchain: TestToolchain = TestToolchain(), workDirectory: URL = SharedPaths.debugDirectory) {
         self.settings = settings
         self.toolchain = toolchain
+        self.workDirectory = workDirectory
     }
+
+    public var tools: ToolFinder { ToolFinder(locator: toolchain.locator) }
 
     // MARK: Project roots
 
@@ -61,6 +79,9 @@ public struct TestRunnerResolver: Sendable {
                 ?? nearest(["settings.gradle.kts", "settings.gradle"], from: start)
                 ?? nearest(["build.gradle.kts", "build.gradle"], from: start)
                 ?? start
+        case .cpp: return CppTesting.projectRoot(for: file) ?? start
+        case .javascript, .typescript: return JSTesting.projectRoot(for: file)
+        case .wasm: return start
         }
     }
 
@@ -78,7 +99,7 @@ public struct TestRunnerResolver: Sendable {
     // MARK: Runner selection
 
     /// The runner auto-detection would pick for a project (ignores the user's choice).
-    public func autoKind(for language: Language, projectRoot: URL) -> TestRunnerKind {
+    public func autoKind(for language: Language, projectRoot: URL, file: URL? = nil, text: String? = nil) -> TestRunnerKind {
         let fm = FileManager.default
         switch language {
         case .zig:
@@ -87,12 +108,26 @@ public struct TestRunnerResolver: Sendable {
             return toolchain.cargoNextest() != nil ? .cargoNextest : .cargoTest
         case .kotlin:
             return fm.isExecutableFile(atPath: projectRoot.appendingPathComponent("gradlew").path) ? .gradleWrapper : .gradle
+        case .cpp:
+            return .ctest
+        case .javascript, .typescript:
+            let source = text ?? file.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+            return JSTesting.autoKind(file: file ?? projectRoot, text: source, projectRoot: projectRoot)
+        case .wasm:
+            if let file, WasmTesting.isScript(file.path) { return .wasmtimeWast }
+            return tools.wasmtime() == nil ? .nodeWasm : .wasmtimeInvoke
         }
     }
 
-    public func kind(for language: Language, projectRoot: URL) -> TestRunnerKind {
-        if let chosen = settings.testRunner(for: language), chosen.language == language { return chosen }
-        return autoKind(for: language, projectRoot: projectRoot)
+    public func kind(for language: Language, projectRoot: URL, file: URL? = nil, text: String? = nil) -> TestRunnerKind {
+        if language == .wasm, let file {
+            // .wast scripts only run with `wasmtime wast`; text modules never do.
+            let script = WasmTesting.isScript(file.path)
+            if script { return .wasmtimeWast }
+            if settings.testRunner(for: language) == .wasmtimeWast { return autoKind(for: language, projectRoot: projectRoot, file: file, text: text) }
+        }
+        if let chosen = settings.testRunner(for: language), chosen.supports(language) { return chosen }
+        return autoKind(for: language, projectRoot: projectRoot, file: file, text: text)
     }
 
     public func executable(for kind: TestRunnerKind, projectRoot: URL) throws -> URL {
@@ -103,7 +138,8 @@ public struct TestRunnerResolver: Sendable {
             }
             return wrapper
         }
-        if let custom = settings.testExecutablePath(for: kind.language), FileManager.default.isExecutableFile(atPath: custom) {
+        if let custom = settings.testExecutablePath(for: kind.language), FileManager.default.isExecutableFile(atPath: custom),
+           kind.isClassic || URL(fileURLWithPath: custom).lastPathComponent.hasPrefix(kind.toolName) {
             return URL(fileURLWithPath: custom)
         }
         let found: URL?
@@ -117,6 +153,20 @@ public struct TestRunnerResolver: Sendable {
             found = toolchain.gradle(); hint = "Install Gradle (e.g. `mise use -g gradle@latest`), add ./gradlew to the project, or choose gradle in CrossKit settings."
         case .gradleWrapper:
             found = nil; hint = ""
+        case .ctest:
+            found = tools.cmake(); hint = ToolFinder.cmakeHint + " CTest ships with CMake."
+        case .vitest:
+            found = tools.nodePackageBinary("vitest", projectRoot: projectRoot)
+            hint = "Add it to the project (`npm install -D vitest`) or install it globally (`mise use -g npm:vitest`)."
+        case .jest:
+            found = tools.nodePackageBinary("jest", projectRoot: projectRoot)
+            hint = "Add it to the project (`npm install -D jest`) or install it globally (`mise use -g npm:jest`)."
+        case .nodeTest, .nodeWasm:
+            found = tools.node(); hint = ToolFinder.nodeHint
+        case .bunTest:
+            found = tools.bun(); hint = "Install Bun (https://bun.sh or `mise use -g bun`)."
+        case .wasmtimeInvoke, .wasmtimeWast:
+            found = tools.wasmtime(); hint = ToolFinder.wasmtimeHint + " Or pick the Node.js harness runner in CrossKit settings."
         }
         guard let found else { throw TestRunnerError.toolNotFound(kind.toolName, hint: hint) }
         if kind == .cargoNextest, toolchain.cargoNextest() == nil {
@@ -128,9 +178,13 @@ public struct TestRunnerResolver: Sendable {
     // MARK: Commands
 
     public func command(language: Language, file: URL, scope: TestScope, tests: [DiscoveredTest],
-                        cursorTest: DiscoveredTest?) throws -> TestCommand {
+                        cursorTest: DiscoveredTest?, text: String? = nil, coverage: Bool = false) throws -> TestCommand {
         let root = projectRoot(for: file, language: language)
-        let kind = kind(for: language, projectRoot: root)
+        var kind = kind(for: language, projectRoot: root, file: file, text: text)
+        if coverage, kind == .wasmtimeInvoke { kind = .nodeWasm }   // counters are read by the Node.js harness
+        if coverage, !kind.supportsCoverage {
+            throw TestRunnerError.noProject("Coverage is not available for \(kind.displayName). Choose another test runner in CrossKit settings.")
+        }
         let exe = try executable(for: kind, projectRoot: root)
         var args: [String]
         var reports: String?
@@ -179,6 +233,9 @@ public struct TestRunnerResolver: Sendable {
                 for name in classes { args += ["--tests", name] }
             }
             reports = reportsDir.path
+        case .ctest, .vitest, .jest, .nodeTest, .bunTest, .wasmtimeInvoke, .nodeWasm, .wasmtimeWast:
+            return try extendedCommand(kind: kind, executable: exe, language: language, file: file, root: root, scope: scope,
+                                       tests: tests, cursorTest: cursorTest, coverage: coverage)
         }
         let extra = settings.testArguments(for: language)
         if kind == .cargoTest, let separator = args.firstIndex(of: "--") {
@@ -225,6 +282,11 @@ public struct TestRunnerResolver: Sendable {
         var env = ProcessInfo.processInfo.environment
         var paths = [executable.deletingLastPathComponent().path]
         if language == .rust, let nextest = toolchain.cargoNextest() { paths.append(nextest.deletingLastPathComponent().path) }
+        if [.javascript, .typescript, .wasm].contains(language), let node = tools.node() { paths.append(node.deletingLastPathComponent().path) }
+        if language == .cpp {
+            if let cmake = tools.cmake() { paths.append(cmake.deletingLastPathComponent().path) }
+            paths += tools.developerBinDirectories.map(\.path)
+        }
         if language == .kotlin, let javaHome = toolchain.locator.javaHome() {
             if env["JAVA_HOME"] == nil { env["JAVA_HOME"] = javaHome.path }
             paths.append(javaHome.appendingPathComponent("bin").path)
@@ -255,6 +317,15 @@ public enum TestExecutor {
     public static let maxOutputBytes = 4 * 1024 * 1024
 
     public static func run(_ command: TestCommand, timeout: TimeInterval) async throws -> Outcome {
+        try await run(executable: command.executable, arguments: command.arguments, workingDirectory: command.workingDirectory,
+                      environment: command.environment, timeout: timeout)
+    }
+
+    /// Runs any tool the same way (own process group, timeout, combined output).
+    public static func run(executable: String, arguments: [String], workingDirectory: String,
+                           environment: [String: String] = ProcessInfo.processInfo.environment,
+                           timeout: TimeInterval) async throws -> Outcome {
+        let command = (executable: executable, arguments: arguments, environment: environment, workingDirectory: workingDirectory)
         let buffer = OutputBuffer(limit: maxOutputBytes)
         let streamsClosed = DispatchGroup()
         streamsClosed.enter(); streamsClosed.enter()
@@ -321,17 +392,28 @@ public struct TestService: Sendable {
 
     public func run(_ language: Language, file: URL, text: String, scope: TestScope, cursorLine: Int,
                     tests: [DiscoveredTest]) async throws -> TestRunResult {
+        try await execute(language, file: file, text: text, scope: scope, cursorLine: cursorLine, tests: tests, coverage: false).run
+    }
+
+    /// Runs the tests and returns the command too (its coverage artifacts when `coverage` is set).
+    public func execute(_ language: Language, file: URL, text: String, scope: TestScope, cursorLine: Int,
+                        tests: [DiscoveredTest], coverage: Bool) async throws -> (run: TestRunResult, command: TestCommand) {
         guard !tests.isEmpty else { throw TestRunnerError.noTests(file.lastPathComponent) }
         var cursorTest: DiscoveredTest?
         if scope == .cursor {
             guard let test = TestDiscovery.test(at: cursorLine, in: tests) else { throw TestRunnerError.noTestAtCursor }
             cursorTest = test
         }
-        let command = try resolver.command(language: language, file: file, scope: scope, tests: tests, cursorTest: cursorTest)
+        let command = try resolver.command(language: language, file: file, scope: scope, tests: tests, cursorTest: cursorTest,
+                                           text: text, coverage: coverage)
         let started = Date()
         let outcome = try await TestExecutor.run(command, timeout: resolver.settings.testTimeout)
         var results = TestResultParser.parse(kind: command.kind, output: outcome.output,
-                                             reportsDirectory: command.reportsDirectory, since: started)
+                                             reportsDirectory: command.reportsDirectory, since: started,
+                                             reportFile: command.reportFile)
+        if command.kind == .wasmtimeWast {
+            results = WasmTesting.parseWast(outcome.output, exitCode: outcome.exitCode, tests: tests)
+        }
         if command.kind == .zigBuild {
             // zig build only names failing tests; tests of this file that did not fail passed if the run executed.
             let ran = outcome.exitCode == 0 || !results.isEmpty || TestResultParser.zigBuildCounts(outcome.output) != nil
@@ -363,10 +445,11 @@ public struct TestService: Sendable {
         if disk.trimmingCharacters(in: .whitespacesAndNewlines) != InlineAnnotations.cleanText(text).trimmingCharacters(in: .whitespacesAndNewlines) {
             run.warning = "The editor buffer has unsaved changes; tests ran against the saved file."
         }
-        return run
+        return (run, command)
     }
 
     static func matches(_ resultName: String, _ test: DiscoveredTest) -> Bool {
+        if let pattern = test.matchPattern, resultName.range(of: pattern, options: .regularExpression) != nil { return true }
         let filter = test.filter
         if resultName == filter || resultName == test.name && !test.name.isEmpty { return true }
         if !filter.isEmpty, resultName.hasSuffix("::" + filter) || resultName.hasSuffix("." + filter) { return true }

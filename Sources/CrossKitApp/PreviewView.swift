@@ -3,7 +3,8 @@ import AppKit
 import Combine
 import CrossKitCore
 
-/// Compose previews of one Kotlin file, like Xcode's canvas for SwiftUI.
+/// Compose previews of one Kotlin file, like Xcode's canvas for SwiftUI, and inspections of C++,
+/// JavaScript/TypeScript and WebAssembly files (assembly, symbols, emitted JavaScript, WAT, hex…).
 @MainActor
 enum PreviewWindow {
     private static var window: NSWindow?
@@ -31,6 +32,17 @@ struct PreviewView: View {
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        Group {
+            if model.previewShowsInspection || (model.preview == nil && (model.inspection != nil || model.inspectionError != nil)) {
+                InspectionView(showComposeButton: model.preview != nil)
+            } else {
+                composeBody
+            }
+        }
+        .onReceive(timer) { _ in model.checkPreviewAutoRefresh() }
+    }
+
+    private var composeBody: some View {
         VStack(spacing: 0) {
             toolbar
             Divider()
@@ -57,18 +69,21 @@ struct PreviewView: View {
                     .onChange(of: result.id) { _, _ in if let id = result.focusedID { proxy.scrollTo(id, anchor: .top) } }
                 }
             } else {
-                Text("No preview yet.\nPut the cursor in a @Preview function and use Editor › CrossKit › Show Compose Preview at Cursor.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 10) {
+                    Text("No preview yet.\nPut the cursor in a @Preview function and use Editor › CrossKit › Show Preview.\nFor C++, JavaScript, TypeScript and WebAssembly files the same command shows an inspection.")
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                    Button("Inspect a File…") { model.chooseFileToInspect() }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onReceive(timer) { _ in model.checkPreviewAutoRefresh() }
     }
 
     private var toolbar: some View {
         HStack(spacing: 10) {
             if let result = model.preview {
+                FileIconView(path: result.filePath, size: 22)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(result.fileName).font(.headline)
                     Text("\(result.target) · \(result.summary)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -85,6 +100,9 @@ struct PreviewView: View {
             .labelsHidden()
             .fixedSize()
             Toggle("Log", isOn: $showLog).toggleStyle(.button)
+            if model.inspection != nil {
+                Button("Inspection") { model.previewShowsInspection = true }
+            }
             Button("Refresh") { model.refreshPreview() }
                 .keyboardShortcut("r")
                 .disabled(model.preview == nil || model.previewRendering)
@@ -134,5 +152,85 @@ struct PreviewView: View {
                 }
             }
         }
+    }
+}
+
+/// Tabs of one file inspection (`InspectService`): e.g. Assembly -O0/-O2, Symbols and Includes for C++,
+/// Outline, Imports, Emitted JavaScript and Type Check for TypeScript, Module, WAT and Hex for WebAssembly.
+struct InspectionView: View {
+    @EnvironmentObject private var model: AppModel
+    let showComposeButton: Bool
+    @State private var selectedSection: String?
+    @State private var showCommand = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            toolbar
+            Divider()
+            if let error = model.inspectionError {
+                Text(error).font(.caption.monospaced()).foregroundStyle(.red).textSelection(.enabled).padding(10)
+            }
+            if let result = model.inspection {
+                if let warning = result.warning {
+                    Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange).padding(.horizontal, 10).padding(.top, 6)
+                }
+                Picker("Section", selection: Binding(get: { currentID(result) }, set: { selectedSection = $0 })) {
+                    ForEach(result.sections) { section in
+                        Label(section.title, systemImage: section.failed ? "exclamationmark.circle" : "doc.text").tag(Optional(section.id))
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(10)
+                if let section = result.sections.first(where: { $0.id == currentID(result) }) {
+                    ScrollView([.vertical, .horizontal]) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if showCommand, let command = section.command {
+                                Text("$ " + command).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                            Text(section.text.isEmpty ? "(empty)" : section.text)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(section.failed ? Color.red : Color.primary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(12)
+                    }
+                }
+            } else if model.inspectionError == nil {
+                Text("No inspection yet.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func currentID(_ result: InspectionResult) -> String? {
+        if let selectedSection, result.sections.contains(where: { $0.id == selectedSection }) { return selectedSection }
+        return result.sections.first?.id
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            if let result = model.inspection {
+                FileIconView(path: result.filePath, size: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text((result.filePath as NSString).lastPathComponent).font(.headline)
+                    Text("\(result.language.displayName) · \(result.sections.count) sections · \(String(format: "%.1fs", result.duration))")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer()
+            if model.inspecting { ProgressView().controlSize(.small) }
+            Toggle("Auto-refresh on save", isOn: model.previewAutoRefreshBinding).toggleStyle(.checkbox)
+            Toggle("Command", isOn: $showCommand).toggleStyle(.button)
+            if showComposeButton {
+                Button("Compose") { model.previewShowsInspection = false }
+            }
+            Button("Open…") { model.chooseFileToInspect() }
+            Button("Refresh") { model.refreshInspection() }
+                .keyboardShortcut("r")
+                .disabled(model.inspection == nil || model.inspecting)
+        }
+        .padding(10)
     }
 }

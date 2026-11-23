@@ -110,6 +110,14 @@
 					<key>XCSourceEditorCommandClassName</key>
 					<string>$(PRODUCT_MODULE_NAME).SourceEditorCommand</string>
 					<key>XCSourceEditorCommandIdentifier</key>
+					<string>dev.pyrlyn.CrossKit.Extension.runTestsWithCoverage</string>
+					<key>XCSourceEditorCommandName</key>
+					<string>Run Tests with Coverage</string>
+				</dict>
+				<dict>
+					<key>XCSourceEditorCommandClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SourceEditorCommand</string>
+					<key>XCSourceEditorCommandIdentifier</key>
 					<string>dev.pyrlyn.CrossKit.Extension.debugFileAtCursor</string>
 					<key>XCSourceEditorCommandName</key>
 					<string>Debug File at Cursor</string>
@@ -144,7 +152,7 @@
 					<key>XCSourceEditorCommandIdentifier</key>
 					<string>dev.pyrlyn.CrossKit.Extension.showPreview</string>
 					<key>XCSourceEditorCommandName</key>
-					<string>Show Compose Preview at Cursor</string>
+					<string>Show Preview</string>
 				</dict>
 				<dict>
 					<key>XCSourceEditorCommandClassName</key>

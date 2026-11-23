@@ -72,9 +72,9 @@ public final class LSPClient: @unchecked Sendable {
 
     // MARK: Lifecycle
 
-    public func initialize(timeout: TimeInterval) async throws {
+    public func initialize(timeout: TimeInterval, initializationOptions: JSONValue? = nil) async throws {
         let rootURI = root.absoluteString
-        let params: JSONValue = [
+        var params: JSONValue = [
             "processId": .int(Int(getpid())),
             "clientInfo": ["name": "CrossKit", "version": "1.0"],
             "rootUri": .string(rootURI),
@@ -101,6 +101,10 @@ public final class LSPClient: @unchecked Sendable {
                 ],
             ],
         ]
+        if let initializationOptions, case .object(var object) = params {
+            object["initializationOptions"] = initializationOptions
+            params = .object(object)
+        }
         let result = try await request("initialize", params, timeout: timeout)
         setCapabilities(result["capabilities"] ?? .null)
         try notify("initialized", [:])
@@ -204,7 +208,7 @@ public final class LSPClient: @unchecked Sendable {
         lock.unlock()
         if previous == nil {
             try notify("textDocument/didOpen", ["textDocument": [
-                "uri": .string(uri), "languageId": .string(language.languageID), "version": .int(version), "text": .string(text),
+                "uri": .string(uri), "languageId": .string(language.languageID(forPath: URL(string: uri)?.path)), "version": .int(version), "text": .string(text),
             ]])
         } else {
             try notify("textDocument/didChange", [

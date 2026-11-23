@@ -125,8 +125,15 @@ public final class RunService: @unchecked Sendable {
                 // The classpath line is noise in the program's output window.
                 update(run.id) { r in r.output = r.output.split(separator: "\n", omittingEmptySubsequences: false)
                     .filter { !$0.hasPrefix("CROSSKIT_CLASSPATH=") }.joined(separator: "\n") }
-            case .gradleTest:
+            case .gradleTest, .ctestCommand:
                 throw DebugError.noProgram("Run File runs programs, not tests. Use Run Test at Cursor.")
+            case .cmakeTarget, .command:
+                guard let resolved = try LaunchPlanner.resolveCommand(plan.programSource, plan: plan, inspector: nil) else {
+                    throw DebugError.noProgram("Nothing to run in \(file.lastPathComponent).")
+                }
+                program = resolved.executable
+                executable = resolved.executable
+                arguments = resolved.arguments
             }
             guard FileManager.default.isExecutableFile(atPath: executable) else { throw DebugError.noProgram("Program not found: \(executable)") }
         } catch {
